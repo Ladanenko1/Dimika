@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from typing import Optional, Union
 
 from jose import jwt
 from passlib.context import CryptContext
@@ -17,7 +18,7 @@ def hash_password(password: str) -> str:
     return pwd_context.hash(password)
 
 
-def create_access_token(subject: str | int, expires_delta: timedelta | None = None) -> str:
+def create_access_token(subject: Union[str, int], expires_delta: Optional[timedelta] = None) -> str:
     expire = datetime.now(timezone.utc) + (
         expires_delta or timedelta(minutes=settings.access_token_expire_minutes)
     )

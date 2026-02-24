@@ -1,7 +1,7 @@
 from decimal import Decimal
-from typing import Optional
+from typing import List, Optional
 
-from sqlalchemy import ForeignKey, Integer, Numeric, String
+from sqlalchemy import Boolean, ForeignKey, Integer, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -13,6 +13,7 @@ class User(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     login: Mapped[str] = mapped_column(String(80), unique=True, nullable=False, index=True)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
 
 
 class Supplier(Base):
@@ -22,7 +23,7 @@ class Supplier(Base):
     first_name: Mapped[str] = mapped_column(String(120), nullable=False)
     last_name: Mapped[str] = mapped_column(String(120), nullable=False)
 
-    products: Mapped[list["Product"]] = relationship(back_populates="supplier")
+    products: Mapped[List["Product"]] = relationship(back_populates="supplier")
 
 
 class Product(Base):
@@ -39,12 +40,12 @@ class Product(Base):
     )
 
     supplier: Mapped[Optional["Supplier"]] = relationship(back_populates="products")
-    variants: Mapped[list["ProductVariant"]] = relationship(
+    variants: Mapped[List["ProductVariant"]] = relationship(
         back_populates="product",
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
-    photos: Mapped[list["Photo"]] = relationship(
+    photos: Mapped[List["Photo"]] = relationship(
         back_populates="product",
         cascade="all, delete-orphan",
         passive_deletes=True,
@@ -76,6 +77,15 @@ class Photo(Base):
     products_id: Mapped[int] = mapped_column(
         ForeignKey("products.id_products", ondelete="CASCADE"), index=True
     )
-    file: Mapped[str] = mapped_column(String(255), nullable=False)
+    file: Mapped[str] = mapped_column(String(1000), nullable=False)
 
     product: Mapped["Product"] = relationship(back_populates="photos")
+
+
+class Question(Base):
+    __tablename__ = "questions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    email: Mapped[str] = mapped_column(String(254), nullable=False)
+    question: Mapped[str] = mapped_column(String(4000), nullable=False)

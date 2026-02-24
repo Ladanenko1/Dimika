@@ -17,11 +17,12 @@ def create_or_update_admin(login: str, password: str) -> None:
     with SessionLocal() as db:
         user = db.execute(select(User).where(User.login == login)).scalar_one_or_none()
         if user is None:
-            user = User(login=login, password_hash=hash_password(password))
+            user = User(login=login, password_hash=hash_password(password), is_admin=True)
             db.add(user)
             action = "created"
         else:
             user.password_hash = hash_password(password)
+            user.is_admin = True
             action = "updated"
 
         db.commit()

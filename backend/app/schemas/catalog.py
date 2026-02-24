@@ -24,7 +24,7 @@ class SupplierOut(SupplierBase):
 
 
 class PhotoCreate(BaseModel):
-    file: str = Field(min_length=1, max_length=255)
+    file: str = Field(min_length=1, max_length=1000)
 
 
 class PhotoOut(PhotoCreate):
@@ -76,7 +76,6 @@ class ProductBase(BaseModel):
 
 class ProductCreate(ProductBase):
     variants: list[VariantCreate] = Field(default_factory=list)
-    photos: list[PhotoCreate] = Field(default_factory=list)
 
 
 class ProductUpdate(BaseModel):
@@ -102,6 +101,8 @@ class ExcelImportOut(BaseModel):
     inserted: int
     updated: int
     skipped: int
+    without_photos: int = 0
+    photos_inserted: int
     supplier_id: int | None = None
     supplier_name: str | None = None
     parse_errors: list[str] = Field(default_factory=list)

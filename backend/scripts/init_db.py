@@ -13,7 +13,7 @@ if str(BASE_DIR) not in sys.path:
 
 from app.core.config import settings
 from app.core.database import Base, engine
-from app.models import Photo, Product, ProductVariant, Supplier, User  # noqa: F401
+from app.models import Photo, Product, ProductVariant, Question, Supplier, User  # noqa: F401
 
 
 def _is_tcp_reachable(host: str, port: int) -> bool:
@@ -94,6 +94,9 @@ def create_tables() -> None:
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE products ADD COLUMN IF NOT EXISTS brand VARCHAR(120)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_products_brand ON products(brand)"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT TRUE"))
+        conn.execute(text("UPDATE users SET is_admin = TRUE WHERE is_admin IS NULL"))
+        conn.execute(text("ALTER TABLE photos ALTER COLUMN file TYPE VARCHAR(1000)"))
 
 
 def main() -> None:

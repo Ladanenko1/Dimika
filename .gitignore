@@ -1,5 +1,5 @@
 .idea/
-Scripts/
+/Scripts/
 Lib/
 .env
 node_modules/

@@ -15,5 +15,6 @@ class TokenResponse(BaseModel):
 class UserOut(BaseModel):
     id: int
     login: str
+    is_admin: bool
 
     model_config = {"from_attributes": True}

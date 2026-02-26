@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import get_admin_user
 from app.core.database import get_db
-from app.models import Photo, Product, ProductVariant, Supplier
+from app.models import Photo, Product, ProductVariant, Question, Supplier
 from app.schemas.catalog import (
     ExcelImportOut,
     PhotoCreate,
@@ -20,6 +20,7 @@ from app.schemas.catalog import (
     VariantOut,
     VariantUpdate,
 )
+from app.schemas.feedback import QuestionOut
 from app.services import import_rows_to_db, parse_supplier_excel
 
 
@@ -93,6 +94,22 @@ def _resolve_supplier_id(
     return supplier.id_s, _supplier_display_name(supplier)
 
 
+@router.get("/questions", response_model=list[QuestionOut])
+def list_questions(db: Session = Depends(get_db)) -> list[QuestionOut]:
+    stmt = select(Question).order_by(Question.id.desc())
+    return list(db.execute(stmt).scalars().all())
+
+
+@router.delete("/questions/{question_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_question(question_id: int, db: Session = Depends(get_db)) -> None:
+    question = db.get(Question, question_id)
+    if question is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Question not found")
+
+    db.delete(question)
+    db.commit()
+
+
 @router.get("/suppliers", response_model=list[SupplierOut])
 def list_suppliers(db: Session = Depends(get_db)) -> list[SupplierOut]:
     return list(db.execute(select(Supplier).order_by(Supplier.id_s.desc())).scalars().all())
@@ -130,12 +147,12 @@ def delete_supplier(supplier_id: int, db: Session = Depends(get_db)) -> None:
     supplier = db.get(Supplier, supplier_id)
     if supplier is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Supplier not found")
-    if supplier.products:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Supplier has linked products",
-        )
 
+    linked_products = db.execute(
+        select(Product).where(Product.supplier_id == supplier_id)
+    ).scalars().all()
+    for product in linked_products:
+        db.delete(product)
     db.delete(supplier)
     db.commit()
 
@@ -183,8 +200,10 @@ def import_excel_catalog(
         inserted=report.inserted,
         updated=report.updated,
         skipped=report.skipped,
+        without_photos=report.without_photos,
         supplier_id=resolved_supplier_id,
         supplier_name=resolved_supplier_name,
+        photos_inserted=report.photos_inserted,
         parse_errors=parse_errors,
         import_errors=report.errors,
     )
@@ -208,13 +227,11 @@ def admin_list_products(db: Session = Depends(get_db)) -> list[ProductOut]:
 def create_product(payload: ProductCreate, db: Session = Depends(get_db)) -> ProductOut:
     _validate_supplier(db, payload.supplier_id)
 
-    product_data = payload.model_dump(exclude={"variants", "photos"})
+    product_data = payload.model_dump(exclude={"variants"})
     product = Product(**product_data)
 
     for variant_data in payload.variants:
         product.variants.append(ProductVariant(**variant_data.model_dump()))
-    for photo_data in payload.photos:
-        product.photos.append(Photo(file=photo_data.file))
 
     db.add(product)
     try:
@@ -263,6 +280,53 @@ def delete_product(product_id: int, db: Session = Depends(get_db)) -> None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
 
     db.delete(product)
+    db.commit()
+
+
+@router.post(
+    "/products/{product_id}/photos",
+    response_model=PhotoOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_photo(
+    product_id: int,
+    payload: PhotoCreate,
+    db: Session = Depends(get_db),
+) -> PhotoOut:
+    product = db.get(Product, product_id)
+    if product is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
+
+    photo = Photo(products_id=product_id, file=payload.file)
+    db.add(photo)
+    db.commit()
+    db.refresh(photo)
+    return photo
+
+
+@router.put("/photos/{photo_id}", response_model=PhotoOut)
+def update_photo(
+    photo_id: int,
+    payload: PhotoCreate,
+    db: Session = Depends(get_db),
+) -> PhotoOut:
+    photo = db.get(Photo, photo_id)
+    if photo is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Photo not found")
+
+    photo.file = payload.file
+    db.commit()
+    db.refresh(photo)
+    return photo
+
+
+@router.delete("/photos/{photo_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_photo(photo_id: int, db: Session = Depends(get_db)) -> None:
+    photo = db.get(Photo, photo_id)
+    if photo is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Photo not found")
+
+    db.delete(photo)
     db.commit()
 
 
@@ -326,35 +390,4 @@ def delete_variant(variant_id: int, db: Session = Depends(get_db)) -> None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Variant not found")
 
     db.delete(variant)
-    db.commit()
-
-
-@router.post(
-    "/products/{product_id}/photos",
-    response_model=PhotoOut,
-    status_code=status.HTTP_201_CREATED,
-)
-def create_photo(
-    product_id: int,
-    payload: PhotoCreate,
-    db: Session = Depends(get_db),
-) -> PhotoOut:
-    product = db.get(Product, product_id)
-    if product is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
-
-    photo = Photo(products_id=product_id, file=payload.file)
-    db.add(photo)
-    db.commit()
-    db.refresh(photo)
-    return photo
-
-
-@router.delete("/photos/{photo_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_photo(photo_id: int, db: Session = Depends(get_db)) -> None:
-    photo = db.get(Photo, photo_id)
-    if photo is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Photo not found")
-
-    db.delete(photo)
     db.commit()

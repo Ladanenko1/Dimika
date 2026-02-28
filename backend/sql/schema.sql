@@ -1,7 +1,8 @@
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
     login VARCHAR(80) NOT NULL UNIQUE,
-    password_hash VARCHAR(255) NOT NULL
+    password_hash VARCHAR(255) NOT NULL,
+    is_admin BOOLEAN NOT NULL DEFAULT TRUE
 );
 
 CREATE TABLE IF NOT EXISTS suppliers (
@@ -35,7 +36,14 @@ CREATE TABLE IF NOT EXISTS products_variants (
 CREATE TABLE IF NOT EXISTS photos (
     id_photo SERIAL PRIMARY KEY,
     products_id INTEGER NOT NULL REFERENCES products(id_products) ON DELETE CASCADE,
-    file VARCHAR(255) NOT NULL
+    file VARCHAR(1000) NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS questions (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(120) NOT NULL,
+    email VARCHAR(254) NOT NULL,
+    question VARCHAR(4000) NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS ix_products_name ON products(name);

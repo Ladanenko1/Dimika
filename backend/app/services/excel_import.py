@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import hashlib
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
@@ -11,7 +12,7 @@ from openpyxl import load_workbook
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Product, ProductVariant
+from app.models import Photo, Product, ProductVariant
 
 
 def _normalize_key(value: str) -> str:
@@ -28,23 +29,49 @@ ALIASES_RAW: dict[str, list[str]] = {
         "Полное название из каталога",
         "Расширенное наименование",
     ],
-    "description": ["Описание", "Описание товара", "Расширенное наименование"],
-    "product_type": ["Тип", "Тип изделия", "Под категория", "Раздел 3го уровня"],
-    "category": ["Категория", "Товарная категория", "Раздел 2го уровня", "Раздел 1го уровня"],
+    "description": ["Описание", "Описание товара", "Расширенное наименование", "Расширенное описание", "Описание для карточки"],
+    "product_type": ["Тип", "Тип изделия", "Под категория", "Раздел 3го уровня", "Категория (уровень 2)"],
+    "category": ["Категория", "Товарная категория", "Раздел 2го уровня", "Раздел 1го уровня", "Категория (уровень 1)"],
     "color": ["Цвет", "цвет", "Цвет решетки"],
     "material": ["Материал", "Вид решетки", "Дизайн"],
     "country": ["Страна производителя", "Страна", "Страна происхождения"],
     "brand": ["Бренд", "Компания"],
-    "length": ["Длина, см", "Длина", "Длина упаковки, мм"],
-    "width": ["Ширина, см", "Ширина", "Ширина упаковки, мм"],
-    "height": ["Высота, см", "Высота", "Высота упаковки, мм", "Глубина упаковки, мм"],
+    "length": [
+        "Длина, см",
+        "Длина, мм",
+        "Длина",
+        "Глубина",
+        "Глубина, мм",
+        "Длина (глубина) изделия (мм.)",
+        "Длина упаковки, мм",
+    ],
+    "width": ["Ширина, см", "Ширина, мм", "Ширина", "Ширина изделия (мм.)", "Ширина упаковки, мм"],
+    "height": ["Высота, см", "Высота, мм", "Высота", "Высота изделия (мм.)", "Высота упаковки, мм", "Глубина упаковки, мм"],
     "size": ["Размер", "Размер (длина, ширина, высота)", "Габариты"],
     "price": [
+        "Цена",
         "Цена (руб.)",
+        "Цена руб",
         "Итоговая цена со скидкой (руб.)",
         "РРЦ 11.12.25",
         "РРЦ по акции до 31.03.26",
         "РРЦ",
+    ],
+    "photo_urls": [
+        "Фото",
+        "Фотография",
+        "Изображение",
+        "Картинка",
+        "Ссылка на фото",
+        "Ссылки на фото",
+        "URL фото",
+        "Фото URL",
+        "Image",
+        "Image URL",
+        "Photo",
+        "Photo URL",
+        "photo_url",
+        "image_url",
     ],
 }
 
@@ -54,6 +81,23 @@ ALIASES: dict[str, list[str]] = {
 }
 
 MAX_ERRORS = 100
+HEADER_SCAN_ROWS = 15
+PHOTO_URL_PATTERN = re.compile(r"https?://[^\s,;|]+", flags=re.IGNORECASE)
+PHOTO_LINK_ROW_KEY = "__photo_links"
+IMAGE_URL_PATTERN = re.compile(
+    r"^https?://.+\.(?:jpe?g|png|webp|gif|bmp|svg)(?:[?#].*)?$",
+    flags=re.IGNORECASE,
+)
+PHOTO_HEADER_PREFIXES = (
+    "фото",
+    "фотография",
+    "изображение",
+    "картинка",
+    "image",
+    "photo",
+)
+UPLOAD_DIR = Path(__file__).resolve().parents[2] / "uploads" / "excel-images"
+UPLOAD_URL_PREFIX = "/uploads/excel-images"
 
 
 @dataclass
@@ -69,6 +113,7 @@ class ParsedCatalogRow:
     country: str | None
     description: str | None
     price: Decimal
+    photo_urls: list[str]
 
 
 @dataclass
@@ -77,6 +122,8 @@ class ImportReport:
     inserted: int = 0
     updated: int = 0
     skipped: int = 0
+    without_photos: int = 0
+    photos_inserted: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -97,6 +144,26 @@ def _first_value(row: dict[str, Any], aliases: list[str]) -> str | None:
     return None
 
 
+def _first_prefixed_value(row: dict[str, Any], prefixes: tuple[str, ...]) -> str | None:
+    for key, value in row.items():
+        if any(key.startswith(prefix) for prefix in prefixes):
+            text = _safe_str(value)
+            if text:
+                return text
+    return None
+
+
+PRICE_PREFIXES = tuple(
+    _normalize_key(value)
+    for value in (
+        "Итоговая цена со скидкой",
+        "РРЦ по акции",
+        "Цена",
+        "РРЦ",
+    )
+)
+
+
 def _parse_decimal(value: str | None) -> Decimal | None:
     if value is None:
         return None
@@ -111,6 +178,174 @@ def _parse_decimal(value: str | None) -> Decimal | None:
     if parsed <= 0:
         return None
     return parsed.quantize(Decimal("0.01"))
+
+
+def _split_photo_urls(value: Any) -> list[str]:
+    text = _safe_str(value)
+    if not text:
+        return []
+
+    candidates = PHOTO_URL_PATTERN.findall(text)
+    if not candidates:
+        candidates = re.split(r"[\n\r,;|]+", text)
+
+    urls: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        url = candidate.strip().strip(".,;")
+        if not re.match(r"^https?://", url, flags=re.IGNORECASE):
+            continue
+        if len(url) > 1000:
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+    return urls
+
+
+def _is_image_url(value: str | None) -> bool:
+    if not value:
+        return False
+    return bool(IMAGE_URL_PATTERN.match(value.strip()))
+
+
+def _extract_photo_urls(row: dict[str, Any]) -> list[str]:
+    photo_aliases = set(ALIASES["photo_urls"])
+    urls: list[str] = []
+    seen: set[str] = set()
+
+    for url in row.get(PHOTO_LINK_ROW_KEY, []) or []:
+        if url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+
+    for header, value in row.items():
+        if header == PHOTO_LINK_ROW_KEY:
+            continue
+        is_photo_header = header in photo_aliases or any(
+            header.startswith(prefix) for prefix in PHOTO_HEADER_PREFIXES
+        )
+        if not is_photo_header:
+            continue
+
+        for url in _split_photo_urls(value):
+            if url in seen:
+                continue
+            seen.add(url)
+            urls.append(url)
+
+    return urls
+
+
+def _safe_file_part(value: str) -> str:
+    text = re.sub(r"[^0-9a-zа-я_-]+", "-", value.lower().strip(), flags=re.IGNORECASE)
+    return text.strip("-") or "excel"
+
+
+def _image_anchor_row(image: Any) -> int | None:
+    marker = getattr(getattr(image, "anchor", None), "_from", None)
+    row = getattr(marker, "row", None)
+    if row is None:
+        return None
+    return int(row) + 1
+
+
+def _image_extension(image: Any) -> str:
+    image_format = str(getattr(image, "format", "") or "").lower()
+    if image_format in {"jpeg", "jpg"}:
+        return "jpg"
+    if image_format in {"png", "gif", "bmp", "webp"}:
+        return image_format
+
+    image_path = str(getattr(image, "path", "") or "")
+    suffix = Path(image_path).suffix.lower().lstrip(".")
+    if suffix in {"jpeg", "jpg", "png", "gif", "bmp", "webp"}:
+        return "jpg" if suffix == "jpeg" else suffix
+    return "png"
+
+
+def _save_embedded_image(image: Any, filename: str, sheet_name: str, row_idx: int, image_idx: int) -> str | None:
+    try:
+        image_bytes = image._data()
+    except Exception:
+        return None
+
+    if not image_bytes:
+        return None
+
+    digest = hashlib.sha1(image_bytes).hexdigest()[:12]
+    extension = _image_extension(image)
+    file_name = (
+        f"{_safe_file_part(Path(filename).stem)}-"
+        f"{_safe_file_part(sheet_name)}-r{row_idx}-{image_idx}-{digest}.{extension}"
+    )
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    target = UPLOAD_DIR / file_name
+    if not target.exists():
+        target.write_bytes(image_bytes)
+    return f"{UPLOAD_URL_PREFIX}/{file_name}"
+
+
+def _extract_embedded_photo_files(sheet: Any, filename: str) -> dict[int, list[str]]:
+    photos_by_row: dict[int, list[str]] = {}
+    for image_idx, image in enumerate(getattr(sheet, "_images", []) or [], start=1):
+        row_idx = _image_anchor_row(image)
+        if row_idx is None or row_idx <= 1:
+            continue
+
+        file_url = _save_embedded_image(image, filename, sheet.title, row_idx, image_idx)
+        if not file_url:
+            continue
+        photos_by_row.setdefault(row_idx, []).append(file_url)
+    return photos_by_row
+
+
+def _alias_fields_for_header(header: str) -> set[str]:
+    fields: set[str] = set()
+    for field, aliases in ALIASES.items():
+        if header in aliases:
+            fields.add(field)
+
+    if any(header.startswith(prefix) for prefix in PHOTO_HEADER_PREFIXES):
+        fields.add("photo_urls")
+    if any(header.startswith(prefix) for prefix in PRICE_PREFIXES):
+        fields.add("price")
+    return fields
+
+
+def _find_header_row(sheet: Any) -> tuple[int, dict[int, str]] | None:
+    best: tuple[int, int, dict[int, str]] | None = None
+    max_scan_row = min(sheet.max_row or 0, HEADER_SCAN_ROWS)
+
+    for row_idx, row in enumerate(
+        sheet.iter_rows(min_row=1, max_row=max_scan_row, values_only=False),
+        start=1,
+    ):
+        normalized_header: dict[int, str] = {}
+        matched_fields: set[str] = set()
+
+        for idx, cell in enumerate(row):
+            header_name = _safe_str(cell.value)
+            if not header_name:
+                continue
+            header = _normalize_key(header_name)
+            normalized_header[idx] = header
+            matched_fields.update(_alias_fields_for_header(header))
+
+        if "article" not in matched_fields:
+            continue
+        if not ({"name", "description"} & matched_fields):
+            continue
+
+        score = len(matched_fields) * 100 + len(normalized_header)
+        if best is None or score > best[0]:
+            best = (score, row_idx, normalized_header)
+
+    if best is None:
+        return None
+    return best[1], best[2]
 
 
 def _extract_size(name: str | None, raw_size: str | None, length: str | None, width: str | None, height: str | None) -> str | None:
@@ -136,6 +371,7 @@ def _row_to_parsed(
     row: dict[str, Any],
     sheet_name: str,
     source_brand: str | None,
+    embedded_photo_files: list[str] | None = None,
 ) -> ParsedCatalogRow | None:
     article = _first_value(row, ALIASES["article"])
     if article is None:
@@ -161,8 +397,12 @@ def _row_to_parsed(
     height = _first_value(row, ALIASES["height"])
     size = _extract_size(name=name, raw_size=raw_size, length=length, width=width, height=height)
 
-    raw_price = _first_value(row, ALIASES["price"])
+    raw_price = _first_value(row, ALIASES["price"]) or _first_prefixed_value(row, PRICE_PREFIXES)
     price = _parse_decimal(raw_price) or Decimal("1.00")
+    photo_urls = _extract_photo_urls(row)
+    for photo_file in embedded_photo_files or []:
+        if photo_file not in photo_urls:
+            photo_urls.append(photo_file)
 
     return ParsedCatalogRow(
         name=name,
@@ -176,7 +416,23 @@ def _row_to_parsed(
         country=country,
         description=description,
         price=price,
+        photo_urls=photo_urls,
     )
+
+
+def _attach_photo_links(product: Product, photo_urls: list[str]) -> int:
+    if not photo_urls:
+        return 0
+
+    existing = {photo.file for photo in product.photos}
+    inserted = 0
+    for url in photo_urls:
+        if url in existing:
+            continue
+        product.photos.append(Photo(file=url))
+        existing.add(url)
+        inserted += 1
+    return inserted
 
 
 def parse_supplier_excel(file_bytes: bytes, filename: str) -> tuple[list[ParsedCatalogRow], list[str]]:
@@ -184,36 +440,46 @@ def parse_supplier_excel(file_bytes: bytes, filename: str) -> tuple[list[ParsedC
     rows: list[ParsedCatalogRow] = []
     source_brand = Path(filename).stem.strip() or None
 
-    workbook = load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
+    workbook = load_workbook(BytesIO(file_bytes), read_only=False, data_only=True)
     try:
         for sheet in workbook.worksheets:
-            iterator = sheet.iter_rows(values_only=True)
-            try:
-                header_row = next(iterator)
-            except StopIteration:
+            embedded_photos = _extract_embedded_photo_files(sheet, filename)
+            header_result = _find_header_row(sheet)
+            if header_result is None:
                 continue
+            header_row_idx, normalized_header = header_result
 
-            normalized_header: dict[int, str] = {}
-            for idx, cell in enumerate(header_row):
-                header_name = _safe_str(cell)
-                if header_name:
-                    normalized_header[idx] = _normalize_key(header_name)
-
-            if not normalized_header:
-                continue
-
-            for row_idx, row_values in enumerate(iterator, start=2):
-                if not row_values or not any(value is not None for value in row_values):
+            for row_idx, row_values in enumerate(
+                sheet.iter_rows(min_row=header_row_idx + 1, values_only=False),
+                start=header_row_idx + 1,
+            ):
+                if not row_values or not any(cell.value is not None for cell in row_values):
                     continue
 
                 normalized_row: dict[str, Any] = {}
-                for idx, value in enumerate(row_values):
+                photo_links: list[str] = []
+                for idx, cell in enumerate(row_values):
+                    cell_text = _safe_str(cell.value)
+                    if _is_image_url(cell_text):
+                        photo_links.append(cell_text)
+                    hyperlink = _safe_str(getattr(getattr(cell, "hyperlink", None), "target", None))
+                    if hyperlink and _is_image_url(hyperlink):
+                        photo_links.append(hyperlink)
+
                     header = normalized_header.get(idx)
                     if header is None:
                         continue
-                    normalized_row[header] = value
+                    normalized_row[header] = cell.value
 
-                parsed = _row_to_parsed(normalized_row, sheet.title, source_brand)
+                if photo_links:
+                    normalized_row[PHOTO_LINK_ROW_KEY] = photo_links
+
+                parsed = _row_to_parsed(
+                    normalized_row,
+                    sheet.title,
+                    source_brand,
+                    embedded_photo_files=embedded_photos.get(row_idx, []),
+                )
                 if parsed is None:
                     continue
                 rows.append(parsed)
@@ -231,6 +497,15 @@ def import_rows_to_db(
     report = ImportReport(total_rows=len(rows))
     for idx, row in enumerate(rows, start=1):
         try:
+            if not row.photo_urls:
+                report.skipped += 1
+                report.without_photos += 1
+                if len(report.errors) < MAX_ERRORS:
+                    report.errors.append(
+                        f"row #{idx} article '{row.article}': skipped because photo is missing"
+                    )
+                continue
+
             existing_variant = db.execute(
                 select(ProductVariant).where(ProductVariant.article == row.article)
             ).scalar_one_or_none()
@@ -255,6 +530,7 @@ def import_rows_to_db(
                 existing_variant.price = row.price
                 existing_variant.material = row.material
                 existing_variant.country = row.country
+                report.photos_inserted += _attach_photo_links(product, row.photo_urls)
                 report.updated += 1
             else:
                 product = Product(
@@ -274,6 +550,7 @@ def import_rows_to_db(
                     country=row.country,
                 )
                 product.variants.append(variant)
+                report.photos_inserted += _attach_photo_links(product, row.photo_urls)
                 db.add(product)
                 report.inserted += 1
 

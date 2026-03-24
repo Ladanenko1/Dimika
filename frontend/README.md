@@ -1,6 +1,6 @@
-# DB Magaz Frontend (React + Vite)
+# Димика — frontend (React + Vite)
 
-## Run
+## Запуск
 
 ```bash
 copy .env.example .env
@@ -8,20 +8,25 @@ npm install
 npm run dev
 ```
 
-Default API:
+API по умолчанию: `VITE_API_BASE_URL=http://127.0.0.1:8000/api/v1`
 
-- `VITE_API_BASE_URL=http://127.0.0.1:8000/api/v1`
+## Отдельная админка
 
-## Features
+```bash
+npm run dev:admin
+```
 
-- Multi-page site:
-  - `/` - Главная
-  - `/catalog` - Каталог
-  - `/about` - О нас
-  - `/contacts` - Контакты
-  - `/admin` - Админ-панель
-- Footer with embedded map
-- Catalog search/filter
-- Admin login by JWT
-- Excel upload into backend import endpoint
-- Supplier name input (ID resolved/created automatically by backend)
+Админка откроется на `http://127.0.0.1:5174/`. Backend должен быть запущен на `http://127.0.0.1:8000`.
+
+## Страницы
+
+- `/` — главная
+- `/catalog` — каталог (поиск, категория, бренд)
+- `/catalog/:productId` — карточка товара (варианты только просмотр)
+- `/about` — о нас
+- `/contacts` — контакты
+- `/admin` — вход, импорт Excel, CRUD поставщиков и товаров (без ручного CRUD вариантов и фото)
+
+## Админка
+
+Варианты и фото создаются при импорте прайса. В интерфейсе редактируются поля товара и справочник поставщиков.

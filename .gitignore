@@ -28,3 +28,6 @@ backend/.venv/
 backend/.venv311/
 backend/.venv*/
 
+.deepseek/
+max
+max.pub
